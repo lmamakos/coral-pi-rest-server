@@ -1,26 +1,27 @@
-# USAGE
 # Start the server:
 # 	python3 coral-app.py
 # Submit a request via cURL:
-# 	curl -X POST -F image=@face.jpg 'http://localhost:5000/predict'
-# Submita a request via Python:
-# 	python simple_request.py
+# 	curl -X POST -F image=@face.jpg 'http://localhost:5000/v1/vision/detection'
 
-# import the necessary packages
 from edgetpu.detection.engine import DetectionEngine
 from PIL import Image
 import flask
 import io
+import logging
 
-# initialize our Flask application and the Keras model
 app = flask.Flask(__name__)
 engine = None
 labels = None
 
-DECIMALS = 2  # The number of decimal places data is returned to
+ROOT_URL = "/v1/vision/detection"
+PORT = 5000
 
-MODEL = "/home/robin/edgetpu/all_models/mobilenet_ssd_v2_coco_quant_postprocess_edgetpu.tflite"
-LABEL_FILE = "/home/robin/edgetpu/all_models/coco_labels.txt"
+MODELS_DIR = "/home/robin/edgetpu/all_models/"
+MODEL = "mobilenet_ssd_v2_coco_quant_postprocess_edgetpu.tflite"
+LABELS = "coco_labels.txt"
+
+MODEL_FILE = MODELS_DIR + MODEL
+LABEL_FILE = MODELS_DIR + LABELS
 
 
 # Function to read labels from text files.
@@ -34,49 +35,29 @@ def ReadLabelFile(file_path):
     return ret
 
 
-def load_model(model_file=None, label_file=None):
-    """
-    Load model and labels.
-    """
-    global engine, labels
-
-    if not model_file:
-        model_file = MODEL
-    if not label_file:
-        label_file = LABEL_FILE
-
-    engine = DetectionEngine(model_file)
-    print("\n Loaded engine with model : {}".format(model_file))
-
-    labels = ReadLabelFile(label_file)
-    print("\n Loaded labels from file : {}".format(label_file))
-
-
 @app.route("/")
 def info():
-    info_str = "Flask app exposing tensorflow models via Google Coral.\n"
+    info_str = f"Flask app exposing tensorflow model: {MODEL_FILE}\n"
     return info_str
 
-
-@app.route("/predict", methods=["POST"])
+@app.route("/predict", methods=["POST"])  # backwards compatability
+@app.route(ROOT_URL, methods=["POST"])
 def predict():
     data = {"success": False}
 
-    # ensure an image was properly uploaded to our endpoint
     if flask.request.method == "POST":
         if flask.request.files.get("image"):
-            # read the image in PIL format
             image_file = flask.request.files["image"]
-            print(image_file)
+            logging.info(image_file)
             image_bytes = image_file.read()
-            image = Image.open(io.BytesIO(image_bytes))  # PIL img object.
+            image = Image.open(io.BytesIO(image_bytes))
 
             # Run inference.
             predictions = engine.DetectWithImage(
                 image,
                 threshold=0.05,
                 keep_aspect_ratio=True,
-                relative_coord=False,  # True = relative coordinates 0-1 of original image.
+                relative_coord=False,
                 top_k=10,
             )
 
@@ -84,19 +65,14 @@ def predict():
                 data["success"] = True
                 preds = []
                 for prediction in predictions:
-                    bounding_box = {
-                        "x1": round(prediction.bounding_box[0, 0], DECIMALS),
-                        "x2": round(prediction.bounding_box[1, 0], DECIMALS),
-                        "y1": round(prediction.bounding_box[0, 1], DECIMALS),
-                        "y2": round(prediction.bounding_box[1, 1], DECIMALS),
-                    }
                     preds.append(
                         {
-                            "confidence": str(
-                                round(100 * prediction.score, DECIMALS)
-                            ),  # A percentage.
+                            "confidence": float(prediction.score),
                             "label": labels[prediction.label_id],
-                            "bounding_box": bounding_box,
+                            "y_min": int(prediction.bounding_box[0, 1]),
+                            "x_min": int(prediction.bounding_box[0, 0]),
+                            "y_max": int(prediction.bounding_box[1, 1]),
+                            "x_max": int(prediction.bounding_box[1, 0]),
                         }
                     )
                 data["predictions"] = preds
@@ -112,12 +88,28 @@ if __name__ == "__main__":
         description="Google Coral edgetpu flask daemon")
     parser.add_argument("--quiet", "-q", action='store_true',
                         help="log only warnings, errors")
-    parser.add_argument("--port", '-p', default=5000,
-                        type=int, choices=range(0, 65536),
+    parser.add_argument("--port", '-p', default=PORT, type=int,
                         help="port number")
     parser.add_argument("--model",  default=None, help="model file")
     parser.add_argument("--labels", default=None, help="labels file for model")
     args = parser.parse_args()
+    
+    if args.quiet:
+        logging.basicConfig(level=logging.WARNING)
+    else:
+        logging.basicConfig(level=logging.DEBUG)
+    
+    if args.model:
+        MODEL_FILE = args.model
+        
+    if args.labels:
+        LABEL_FILE = args.labels
+        
+    if args.port:
+        PORT = int(args.port)
 
-    load_model(args.model, args.labels)
-    app.run(host="0.0.0.0", port=args.port)
+    engine = DetectionEngine(MODEL_FILE)
+    logging.info("\n Loaded engine with model : {}".format(MODEL_FILE))
+
+    labels = ReadLabelFile(LABEL_FILE)
+    app.run(host="0.0.0.0", port=PORT)
